@@ -18,6 +18,9 @@ pub use value::HashBuilderValue;
 mod proof_retainer;
 pub use proof_retainer::ProofRetainer;
 
+#[cfg(feature = "enable_state_root_record")]
+use super::utils::TreeNode;
+
 /// A component used to construct the root hash of the trie. The primary purpose of a Hash Builder
 /// is to build the Merkle proof that is essential for verifying the integrity and authenticity of
 /// the trie's contents. It achieves this by constructing the root hash from the hashes of child
@@ -58,6 +61,11 @@ pub struct HashBuilder {
     pub proof_retainer: Option<ProofRetainer>,
 
     pub rlp_buf: Vec<u8>,
+
+    #[cfg(feature = "enable_state_root_record")]
+    pub tree_nodes: Vec<TreeNode>,
+    #[cfg(feature = "enable_state_root_record")]
+    pub storage_root: Option<TreeNode>,
 }
 
 impl HashBuilder {
@@ -127,6 +135,9 @@ impl HashBuilder {
             self.update(&key);
         } else if key.is_empty() {
             self.stack.push(word_rlp(&value));
+
+            #[cfg(feature = "enable_state_root_record")]
+            self.tree_nodes.push(TreeNode::new_branch());
         }
         self.set_key_value(key, value);
         self.stored_in_database = stored_in_database;
@@ -143,11 +154,32 @@ impl HashBuilder {
         self.current_root()
     }
 
+    /// return number of nodes and total dept of nodes
+    /// Call root() first
+    #[cfg(feature = "enable_state_root_record")]
+    pub fn root_tree_node(&mut self) -> TreeNode {
+        if let Some(node) = self.tree_nodes.last() {
+            return node.clone();
+        }
+        TreeNode::default()
+    }
+
+    /// set storage root of storage trie
+    #[cfg(feature = "enable_state_root_record")]
+    pub fn set_storage_root(&mut self, root: Option<TreeNode>) {
+        self.storage_root = root;
+    }
+
     fn set_key_value<T: Into<HashBuilderValue>>(&mut self, key: Nibbles, value: T) {
         trace!(target: "trie::hash_builder", key = ?self.key, value = ?self.value, "old key/value");
         self.key = key;
         self.value = value.into();
         trace!(target: "trie::hash_builder", key = ?self.key, value = ?self.value, "new key/value");
+
+        #[cfg(feature = "enable_state_root_record")]
+        {
+            self.storage_root = None;
+        }
     }
 
     fn current_root(&self) -> B256 {
@@ -155,6 +187,9 @@ impl HashBuilder {
             if node_ref.len() == B256::len_bytes() + 1 {
                 B256::from_slice(&node_ref[1..])
             } else {
+                #[cfg(feature = "enable_state_root_record")]
+                let _recorder = super::utils::Keccak256Recorder::new();
+
                 keccak256(node_ref)
             }
         } else {
@@ -235,11 +270,21 @@ impl HashBuilder {
 
                         self.rlp_buf.clear();
                         self.stack.push(leaf_node.rlp(&mut self.rlp_buf));
+
+                        #[cfg(feature = "enable_state_root_record")]
+                        {
+                            let tmp_node = TreeNode::new_leaf(self.storage_root);
+                            self.tree_nodes.push(tmp_node);
+                        }
+
                         self.retain_proof_from_buf(&current);
                     }
                     HashBuilderValue::Hash(hash) => {
                         trace!(target: "trie::hash_builder", ?hash, "pushing branch node hash");
                         self.stack.push(word_rlp(hash));
+
+                        #[cfg(feature = "enable_state_root_record")]
+                        self.tree_nodes.push(TreeNode::new_branch());
 
                         if self.stored_in_database {
                             self.tree_masks[current.len() - 1] |=
@@ -265,6 +310,16 @@ impl HashBuilder {
                 }, "extension node rlp");
                 self.rlp_buf.clear();
                 self.stack.push(extension_node.rlp(&mut self.rlp_buf));
+
+                #[cfg(feature = "enable_state_root_record")]
+                {
+                    let top_tree_node = self
+                        .tree_nodes
+                        .pop()
+                        .expect("there should be at least one stack item; qed");
+                    self.tree_nodes.push(TreeNode::new_extension(&top_tree_node));
+                }
+
                 self.retain_proof_from_buf(&current.slice(..len_from));
                 self.resize_masks(len_from);
             }
@@ -331,6 +386,18 @@ impl HashBuilder {
         trace!(target: "trie::hash_builder", "pushing branch node with {:?} mask from stack", state_mask);
         trace!(target: "trie::hash_builder", rlp = alloy_primitives::hex::encode(&rlp), "branch node rlp");
         self.stack.push(rlp);
+
+        #[cfg(feature = "enable_state_root_record")]
+        {
+            let mut tree_node = TreeNode::new_branch();
+            for i in first_child_idx..self.tree_nodes.len() {
+                tree_node.add_child(&self.tree_nodes[i]);
+            }
+            self.tree_nodes.resize(first_child_idx, TreeNode::default());
+
+            self.tree_nodes.push(tree_node);
+        };
+
         children
     }
 

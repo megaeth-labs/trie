@@ -29,6 +29,9 @@ pub use hash_builder::HashBuilder;
 mod mask;
 pub use mask::TrieMask;
 
+pub mod utils;
+pub use utils::*;
+
 #[cfg(feature = "std")]
 use hashbrown as _;
 #[cfg(feature = "std")]
